@@ -2,35 +2,55 @@ import { Injectable, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "src/database/prisma.service";
 import { CreateTaskDto } from "./dto/create-task.dto";
 import { UpdateTaskDto } from "./dto/update-task.dto";
-import { Prisma } from "@prisma/client";
+import { CacheService } from "../cache/cache.service";
 
 @Injectable()
 export class TasksService {
-    constructor(private readonly prisma: PrismaService) {}
+    constructor(private readonly prisma: PrismaService, private readonly cache: CacheService) {}
+
+    private taskKey(id: string) { return `task:${id}`; }
+    private listKey() { return `tasks:list:all`; }
 
     async create(dto: CreateTaskDto) {
-        return this.prisma.task.create({
+        const created = await this.prisma.task.create({
             data: {
                 title: dto.title,
                 status: dto.status ?? 'TODO',
                 dueDate: dto.dueDate ? new Date(dto.dueDate) : null,
             },
         });
+
+        await this.cache.delPattern('tasks:list:*');
+        await this.cache.setJSON(this.taskKey(created.id), created, this.cache.taskItemTTL());
+        return created;
     }
 
     async findAll() {
-        return this.prisma.task.findMany({ orderBy: { createdAt: 'desc' }});
+        const key = this.listKey();
+        const ttl = this.cache.taskListTTL();
+
+        const value = await this.cache.getOrSetJSON(key, ttl, async () => {
+            const rows = await this.prisma.task.findMany({ orderBy: { createdAt: 'desc' } });
+            return rows;
+        });
+        return value!;
     }
 
     async findOne(id: string) {
-        const task = await this.prisma.task.findUnique({ where: {id}});
-        if (!task) throw new NotFoundException('task not found');
-        return task;
+        const key = this.taskKey(id);
+        const ttl = this.cache.taskItemTTL();
+
+        const item = await this.cache.getOrSetJSON(key, ttl, async () => {
+            return await this.prisma.task.findUnique({ where: { id } });
+        });
+
+        if (!item) throw new NotFoundException('task not found');
+        return item;
     }
 
     async update(id: string, dto: UpdateTaskDto) {
         await this.findOne(id);
-        return this.prisma.task.update({
+        const updated = await this.prisma.task.update({
             where: { id },
             data: {
                 ...(dto.title !== undefined ? { title: dto.title } :{}),
@@ -38,10 +58,16 @@ export class TasksService {
                 ...(dto.dueDate !== undefined ? { dueDate: dto.dueDate ? new Date(dto.dueDate) : null } : {}),
             },
         });
+
+        await this.cache.del(this.taskKey(id));
+        await this.cache.delPattern('tasks:list:*');
+        return updated;
     }
 
     async remove(id: string) {
         await this.findOne(id);
         await this.prisma.task.delete({ where: { id } });
+        await this.cache.del(this.taskKey(id));
+        await this.cache.delPattern('tasks:list:*');
     }
 }
