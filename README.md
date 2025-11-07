@@ -63,4 +63,4 @@ npm install
 
 ## License
 
-[MIT][https://opensource.org/license/MIT]
+[MIT](https://opensource.org/license/MIT)
